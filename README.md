@@ -2,7 +2,8 @@
 
 A lightweight desktop calculator built with **C++17** and **X11/Xft** — no GUI toolkit required.
 
-![Number Grid Calculator](screenshot.png)
+<img width="420" height="511" alt="Screenshot from 2026-03-30 12-22-05" src="https://github.com/user-attachments/assets/94573b42-0c14-4e2e-ba2a-530d1c4e5987" />
+
 
 ## Features
 
