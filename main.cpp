@@ -1,3 +1,408 @@
+#include "MainWindow.hpp"
+
+#include <windows.h>
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
+    MainWindow window;
+    return window.Run(instance, nCmdShow);
+}
+#include <windows.h>
+
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace {
+
+constexpr int kWindowWidth = 420;
+constexpr int kWindowHeight = 520;
+constexpr int kPad = 20;
+
+enum class Operation {
+    Sum = 0,
+    Multiply = 1
+};
+
+enum ControlId {
+    ID_BTN_ADD = 1001,
+    ID_LIST_NUMBERS,
+    ID_BTN_DELETE,
+    ID_CMB_OPERATION,
+    ID_BTN_CALC,
+    ID_LBL_RESULT,
+    ID_EDIT_ADD_VALUE = 2001
+};
+
+std::wstring ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    const int size = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring ws(size - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], size);
+    return ws;
+}
+
+std::string FormatNumber(double value) {
+    std::ostringstream ss;
+    ss << std::setprecision(10) << value;
+    std::string s = ss.str();
+    if (s.find('.') != std::string::npos) {
+        s.erase(s.find_last_not_of('0') + 1);
+        if (!s.empty() && s.back() == '.') s.pop_back();
+    }
+    return s;
+}
+
+class NumberRepository {
+public:
+    void Add(double value) { numbers_.push_back(value); }
+
+    bool RemoveAt(size_t idx) {
+        if (idx >= numbers_.size()) return false;
+        numbers_.erase(numbers_.begin() + static_cast<std::ptrdiff_t>(idx));
+        return true;
+    }
+
+    const std::vector<double>& All() const { return numbers_; }
+    bool Empty() const { return numbers_.empty(); }
+
+private:
+    std::vector<double> numbers_;
+};
+
+class CalculatorEngine {
+public:
+    static std::wstring BuildResult(const std::vector<double>& values, Operation operation) {
+        if (values.empty()) return L"Result: (no numbers)";
+
+        double result = (operation == Operation::Sum) ? 0.0 : 1.0;
+        for (double v : values) {
+            if (operation == Operation::Sum) {
+                result += v;
+            } else {
+                result *= v;
+            }
+        }
+
+        const std::wstring prefix =
+            (operation == Operation::Sum) ? L"Result (Sum): " : L"Result (Multiply): ";
+        return prefix + ToWide(FormatNumber(result));
+    }
+};
+
+class AddNumberDialog {
+public:
+    static bool Show(HWND parent, double& outValue) {
+        RegisterClassIfNeeded();
+
+        AddNumberDialog dialog;
+        EnableWindow(parent, FALSE);
+
+        HWND hwnd = CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            kDialogClassName,
+            L"Add Number",
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            CW_USEDEFAULT, CW_USEDEFAULT, 290, 160,
+            parent,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            &dialog
+        );
+
+        if (!hwnd) {
+            EnableWindow(parent, TRUE);
+            return false;
+        }
+
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+
+        MSG msg;
+        while (!dialog.done_ && GetMessageW(&msg, nullptr, 0, 0)) {
+            if (!IsDialogMessageW(hwnd, &msg)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        EnableWindow(parent, TRUE);
+        SetActiveWindow(parent);
+
+        if (!dialog.accepted_ || dialog.value_.empty()) return false;
+        try {
+            outValue = std::stod(dialog.value_);
+            return true;
+        } catch (...) {
+            MessageBoxW(parent, L"Invalid number format.", L"Error", MB_OK | MB_ICONERROR);
+            return false;
+        }
+    }
+
+private:
+    static constexpr const wchar_t* kDialogClassName = L"ModernAddNumberDialogClass";
+
+    static void RegisterClassIfNeeded() {
+        static bool registered = false;
+        if (registered) return;
+
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = WndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kDialogClassName;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+
+        if (RegisterClassW(&wc)) {
+            registered = true;
+        }
+    }
+
+    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        AddNumberDialog* self =
+            reinterpret_cast<AddNumberDialog*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+        if (msg == WM_NCCREATE) {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+
+        if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+        switch (msg) {
+        case WM_CREATE: {
+            HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+            CreateWindowW(L"STATIC", L"Enter a number:",
+                WS_CHILD | WS_VISIBLE, 20, 18, 240, 20, hwnd, nullptr, nullptr, nullptr);
+
+            self->edit_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                20, 44, 240, 24, hwnd, reinterpret_cast<HMENU>(ID_EDIT_ADD_VALUE), nullptr, nullptr);
+
+            HWND okBtn = CreateWindowW(L"BUTTON", L"OK",
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                20, 84, 110, 30, hwnd, reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
+
+            HWND cancelBtn = CreateWindowW(L"BUTTON", L"Cancel",
+                WS_CHILD | WS_VISIBLE,
+                150, 84, 110, 30, hwnd, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
+
+            SendMessageW(self->edit_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            SendMessageW(okBtn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            SendMessageW(cancelBtn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            SetFocus(self->edit_);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK) {
+                wchar_t buffer[128] = L"";
+                GetWindowTextW(self->edit_, buffer, 127);
+                self->value_ = buffer;
+                self->accepted_ = true;
+                self->done_ = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            if (LOWORD(wParam) == IDCANCEL) {
+                self->done_ = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        case WM_CLOSE:
+            self->done_ = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    HWND edit_ = nullptr;
+    bool done_ = false;
+    bool accepted_ = false;
+    std::wstring value_;
+};
+
+class MainWindow {
+public:
+    int Run(HINSTANCE instance, int nCmdShow) {
+        if (!RegisterWindowClass(instance)) return 1;
+        if (!Create(instance)) return 1;
+
+        ShowWindow(hwnd_, nCmdShow);
+        UpdateWindow(hwnd_);
+
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        return 0;
+    }
+
+private:
+    static constexpr const wchar_t* kClassName = L"ModernNumberGridCalculatorClass";
+
+    bool RegisterWindowClass(HINSTANCE instance) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = StaticWndProc;
+        wc.hInstance = instance;
+        wc.lpszClassName = kClassName;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        return RegisterClassW(&wc) != 0;
+    }
+
+    bool Create(HINSTANCE instance) {
+        hwnd_ = CreateWindowExW(
+            0,
+            kClassName,
+            L"Number Grid Calculator",
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            CW_USEDEFAULT, CW_USEDEFAULT, kWindowWidth, kWindowHeight,
+            nullptr,
+            nullptr,
+            instance,
+            this
+        );
+        return hwnd_ != nullptr;
+    }
+
+    static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        MainWindow* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+        if (msg == WM_NCCREATE) {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            self = static_cast<MainWindow*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+            self->hwnd_ = hwnd;
+        }
+
+        if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        return self->WndProc(msg, wParam, lParam);
+    }
+
+    LRESULT WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
+        switch (msg) {
+        case WM_CREATE:
+            CreateControls();
+            return 0;
+        case WM_COMMAND:
+            HandleCommand(LOWORD(wParam));
+            return 0;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+        default:
+            return DefWindowProcW(hwnd_, msg, wParam, lParam);
+        }
+    }
+
+    void CreateControls() {
+        HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+        CreateWindowW(L"STATIC", L"Number Grid Calculator",
+            WS_CHILD | WS_VISIBLE,
+            kPad, 8, kWindowWidth - 2 * kPad, 20,
+            hwnd_, nullptr, nullptr, nullptr);
+
+        btnAdd_ = CreateWindowW(L"BUTTON", L"Add Number",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            kPad, 30, kWindowWidth - 2 * kPad, 32,
+            hwnd_, reinterpret_cast<HMENU>(ID_BTN_ADD), nullptr, nullptr);
+
+        list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL,
+            kPad, 80, kWindowWidth - 2 * kPad, 220,
+            hwnd_, reinterpret_cast<HMENU>(ID_LIST_NUMBERS), nullptr, nullptr);
+
+        btnDelete_ = CreateWindowW(L"BUTTON", L"Delete Selected",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            kPad, 308, kWindowWidth - 2 * kPad, 26,
+            hwnd_, reinterpret_cast<HMENU>(ID_BTN_DELETE), nullptr, nullptr);
+
+        comboOp_ = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+            kPad, 342, kWindowWidth - 2 * kPad, 200,
+            hwnd_, reinterpret_cast<HMENU>(ID_CMB_OPERATION), nullptr, nullptr);
+
+        SendMessageW(comboOp_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Sum"));
+        SendMessageW(comboOp_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Multiply"));
+        SendMessageW(comboOp_, CB_SETCURSEL, 0, 0);
+
+        btnCalc_ = CreateWindowW(L"BUTTON", L"Calculate",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            kPad, 382, kWindowWidth - 2 * kPad, 32,
+            hwnd_, reinterpret_cast<HMENU>(ID_BTN_CALC), nullptr, nullptr);
+
+        result_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"Result: -",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            kPad, 428, kWindowWidth - 2 * kPad, 32,
+            hwnd_, reinterpret_cast<HMENU>(ID_LBL_RESULT), nullptr, nullptr);
+
+        SendMessageW(btnAdd_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(list_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(btnDelete_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(comboOp_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(btnCalc_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(result_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    }
+
+    void HandleCommand(int id) {
+        if (id == ID_BTN_ADD) {
+            double value = 0.0;
+            if (AddNumberDialog::Show(hwnd_, value)) {
+                repository_.Add(value);
+                RefreshList();
+                SetWindowTextW(result_, L"Result: -");
+            }
+            return;
+        }
+
+        if (id == ID_BTN_DELETE) {
+            const int selected = static_cast<int>(SendMessageW(list_, LB_GETCURSEL, 0, 0));
+            if (selected != LB_ERR && repository_.RemoveAt(static_cast<size_t>(selected))) {
+                RefreshList();
+                SetWindowTextW(result_, L"Result: -");
+            }
+            return;
+        }
+
+        if (id == ID_BTN_CALC) {
+            const auto operationIndex = static_cast<int>(SendMessageW(comboOp_, CB_GETCURSEL, 0, 0));
+            const Operation op = (operationIndex == 1) ? Operation::Multiply : Operation::Sum;
+            const std::wstring text = CalculatorEngine::BuildResult(repository_.All(), op);
+            SetWindowTextW(result_, text.c_str());
+            return;
+        }
+    }
+
+    void RefreshList() {
+        SendMessageW(list_, LB_RESETCONTENT, 0, 0);
+        for (double value : repository_.All()) {
+            const std::wstring item = ToWide(FormatNumber(value));
+            SendMessageW(list_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+        }
+    }
+
+    HWND hwnd_ = nullptr;
+    HWND btnAdd_ = nullptr;
+    HWND list_ = nullptr;
+    HWND btnDelete_ = nullptr;
+    HWND comboOp_ = nullptr;
+    HWND btnCalc_ = nullptr;
+    HWND result_ = nullptr;
+    NumberRepository repository_;
+};
+
+}  // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
+    MainWindow app;
+    return app.Run(instance, nCmdShow);
+}
 #include <windows.h>
 #include <vector>
 #include <string>
